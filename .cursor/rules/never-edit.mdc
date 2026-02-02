@@ -1,8 +1,0 @@
----
-name: never-edit
-description: This is a new rule
----
-
-# Overview
-
-Never edit files/make files on your own. Tell me what to change and I will do it, unless I specify otherwise.
