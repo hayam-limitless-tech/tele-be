@@ -34,6 +34,7 @@ if os.environ.get('RAILWAY_PUBLIC_DOMAIN'):
 
 CSRF_TRUSTED_ORIGINS = [
     "https://tele-be-production.up.railway.app",
+    "https://tele-be-production.up.railway.app/",
 ]
 
 # Application definition
