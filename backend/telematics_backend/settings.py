@@ -37,6 +37,9 @@ CSRF_TRUSTED_ORIGINS = [
     "https://tele-be-production.up.railway.app/",
 ]
 
+_csrf_origins = os.environ.get("CSRF_TRUSTED_ORIGINS", "")
+CSRF_TRUSTED_ORIGINS = [x.strip() for x in _csrf_origins.split(",") if x.strip()]
+
 # Application definition
 
 INSTALLED_APPS = [
