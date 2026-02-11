@@ -38,6 +38,8 @@
 	<string>This app needs your location to track driving trips and record your route.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>This app needs background location to record your trip accurately when the app is in the background or screen is off.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>This app needs motion sensors to detect harsh braking, acceleration, and crashes.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>location</string>

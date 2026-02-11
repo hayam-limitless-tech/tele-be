@@ -12,6 +12,12 @@ class Trip(models.Model):
     end_latitude = models.FloatField(null=True, blank=True)
     end_longitude = models.FloatField(null=True, blank=True)
     average_speed_kmh = models.FloatField(default=0.0)
+    total_distance_km = models.FloatField(default=0.0)
+    harsh_braking_count = models.IntegerField(default=0)
+    harsh_acceleration_count = models.IntegerField(default=0)
+    crash_detected = models.BooleanField(default=False)
+    crash_latitude = models.FloatField(null=True, blank=True)
+    crash_longitude = models.FloatField(null=True, blank=True)
     safety_score = models.FloatField(null=True, blank=True)
 
     class Meta:

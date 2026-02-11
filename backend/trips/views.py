@@ -10,12 +10,16 @@ from .serializers import TripSerializer, LocationPointSerializer, DrivingEventSe
 
 
 def calculate_safety_score(trip):
-    """Compute safety score 0-100 from trip data and events."""
+    """Compute safety score 0-100 from trip summary data."""
     score = 100.0
-    # Penalty per event by severity
-    penalties = {'mild': 2, 'moderate': 5, 'severe': 10}
-    for event in trip.driving_events.all():
-        score -= penalties.get(event.severity, 2)
+    # Penalty per harsh event
+    penalty_per_brake = 5
+    penalty_per_accel = 4
+    crash_penalty = 50  # Severe penalty for crash
+    score -= trip.harsh_braking_count * penalty_per_brake
+    score -= trip.harsh_acceleration_count * penalty_per_accel
+    if trip.crash_detected:
+        score -= crash_penalty
     # Penalty for high average speed (e.g. over 90 km/h)
     if trip.average_speed_kmh and trip.average_speed_kmh > 90:
         score -= min(20, (trip.average_speed_kmh - 90) * 0.5)
@@ -58,6 +62,18 @@ class TripDetailView(APIView):
             trip.end_time = data.get('end_time')
         if 'average_speed_kmh' is not None:
             trip.average_speed_kmh = data['average_speed_kmh']
+        if 'total_distance_km' in data:
+            trip.total_distance_km = data['total_distance_km']
+        if 'harsh_braking_count' in data:
+            trip.harsh_braking_count = data['harsh_braking_count']
+        if 'harsh_acceleration_count' in data:
+            trip.harsh_acceleration_count = data['harsh_acceleration_count']
+        if 'crash_detected' in data:
+            trip.crash_detected = data['crash_detected']
+        if 'crash_latitude' in data:
+            trip.crash_latitude = data['crash_latitude']
+        if 'crash_longitude' in data:
+            trip.crash_longitude = data['crash_longitude']
         trip.safety_score = calculate_safety_score(trip)
         trip.save()
         serializer = TripSerializer(trip)

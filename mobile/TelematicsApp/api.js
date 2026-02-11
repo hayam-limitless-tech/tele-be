@@ -29,13 +29,25 @@ async function addDrivingEvent(tripId, eventType, severity, speedKmhAtEvent) {
   return data;
 }
 
-async function endTrip(tripId, endLatitude, endLongitude, endTimeIso, averageSpeedKmh) {
-  const { data } = await axios.patch(`${API_BASE}/trips/${tripId}/`, {
+async function endTrip(tripId, endLatitude, endLongitude, endTimeIso, averageSpeedKmh, totalDistanceKm, harshBrakingCount, harshAccelerationCount, crashDetected, crashLatitude, crashLongitude) {
+  const payload = {
     end_latitude: endLatitude,
     end_longitude: endLongitude,
     end_time: endTimeIso,
     average_speed_kmh: averageSpeedKmh,
-  });
+    total_distance_km: totalDistanceKm,
+    harsh_braking_count: harshBrakingCount,
+    harsh_acceleration_count: harshAccelerationCount,
+    crash_detected: crashDetected,
+  };
+  
+  // Only include crash location if crash was detected
+  if (crashDetected && crashLatitude != null && crashLongitude != null) {
+    payload.crash_latitude = crashLatitude;
+    payload.crash_longitude = crashLongitude;
+  }
+  
+  const { data } = await axios.patch(`${API_BASE}/trips/${tripId}/`, payload);
   return data;
 }
 
