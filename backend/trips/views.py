@@ -54,13 +54,13 @@ class TripDetailView(APIView):
     def patch(self, request, trip_id):
         trip = get_object_or_404(Trip, pk=trip_id)
         data = request.data
-        if 'end_latitude' is not None:
+        if 'end_latitude' in data:
             trip.end_latitude = data.get('end_latitude', trip.end_latitude)
-        if 'end_longitude' is not None:
+        if 'end_longitude' in data:
             trip.end_longitude = data.get('end_longitude', trip.end_longitude)
-        if 'end_time' is not None:
+        if 'end_time' in data:
             trip.end_time = data.get('end_time')
-        if 'average_speed_kmh' is not None:
+        if 'average_speed_kmh' in data:
             trip.average_speed_kmh = data['average_speed_kmh']
         if 'total_distance_km' in data:
             trip.total_distance_km = data['total_distance_km']
