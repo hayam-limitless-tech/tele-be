@@ -1,4 +1,3 @@
-//location done v1
 import React, { useEffect, useState, useRef } from 'react';
 import {
   StyleSheet,
