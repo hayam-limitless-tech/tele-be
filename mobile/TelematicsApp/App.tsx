@@ -32,6 +32,8 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [harshBrakeCount, setHarshBrakeCount] = useState(0);
   const [harshAccelerationCount, setHarshAccelerationCount] = useState(0);
+  const [currentSpeedLimit, setCurrentSpeedLimit] = useState<number | null>(null);
+  const [speedingViolations, setSpeedingViolations] = useState(0);
 
   // --- REFS (persist across renders, used in callbacks without causing re-renders) ---
   const tripIdRef = useRef<number | null>(null); // Backend trip ID when driving
@@ -258,6 +260,7 @@ function App() {
           // Fetch speed limit for current location
           getSpeedLimitCached(latitude, longitude).then((limitData: any) => {
             currentSpeedLimitRef.current = limitData.speedLimit;
+            setCurrentSpeedLimit(limitData.speedLimit); // Update UI
             
             // Check if currently speeding (5 km/h tolerance)
             const tolerance = 5;
@@ -268,6 +271,7 @@ function App() {
               wasSpeedingRef.current = true;
               speedingStartTimeRef.current = time;
               speedingViolationsRef.current += 1;
+              setSpeedingViolations(speedingViolationsRef.current); // Update UI
             } else if (!isSpeeding && wasSpeedingRef.current) {
               // Stopped speeding - calculate duration
               wasSpeedingRef.current = false;
@@ -398,6 +402,8 @@ function App() {
       setSafetyScore(null);
       setHarshBrakeCount(0);
       setHarshAccelerationCount(0);
+      setCurrentSpeedLimit(null);
+      setSpeedingViolations(0);
       BackgroundGeolocation.start(); // Start receiving location updates (continues in background)
       if (Platform.OS === 'android') showBatteryPrompt();
     } catch (e: any) {
@@ -478,6 +484,12 @@ function App() {
           <Text style={styles.label}>Speed:</Text>
           <Text style={styles.value}>{speedKmh.toFixed(1)} km/h</Text>
         </View>
+        {status === 'driving' && currentSpeedLimit != null && (
+          <View style={styles.row}>
+            <Text style={styles.label}>Speed limit:</Text>
+            <Text style={styles.value}>{currentSpeedLimit} km/h</Text>
+          </View>
+        )}
         {status === 'driving' && (
           <>
             <View style={styles.row}>
@@ -487,6 +499,10 @@ function App() {
             <View style={styles.row}>
               <Text style={styles.label}>Harsh accelerations:</Text>
               <Text style={[styles.value, styles.harshBrake]}>{harshAccelerationCount}</Text>
+            </View>
+            <View style={styles.row}>
+              <Text style={styles.label}>Speeding violations:</Text>
+              <Text style={[styles.value, styles.harshBrake]}>{speedingViolations}</Text>
             </View>
           </>
         )}
