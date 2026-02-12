@@ -74,6 +74,20 @@ class TripDetailView(APIView):
             trip.crash_latitude = data['crash_latitude']
         if 'crash_longitude' in data:
             trip.crash_longitude = data['crash_longitude']
+        
+        # Process harsh events array if provided
+        if 'harsh_events' in data:
+            for event in data['harsh_events']:
+                DrivingEvent.objects.create(
+                    trip=trip,
+                    event_type=event['type'],  # 'braking' or 'acceleration'
+                    timestamp=event['timestamp'],
+                    latitude=event['latitude'],
+                    longitude=event['longitude'],
+                    speed_kmh_at_event=event.get('speed', 0.0),
+                    severity='moderate'  # Default severity
+                )
+        
         trip.safety_score = calculate_safety_score(trip)
         trip.save()
         serializer = TripSerializer(trip)

@@ -27,5 +27,5 @@ class LocationPointSerializer(serializers.ModelSerializer):
 class DrivingEventSerializer(serializers.ModelSerializer):
     class Meta:
         model = DrivingEvent
-        fields = ['id', 'trip', 'event_type', 'timestamp', 'severity', 'speed_kmh_at_event']
-        read_only_fields = ['id', 'timestamp']
+        fields = ['id', 'trip', 'event_type', 'timestamp', 'latitude', 'longitude', 'severity', 'speed_kmh_at_event']
+        read_only_fields = ['id']

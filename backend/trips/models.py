@@ -60,7 +60,9 @@ class DrivingEvent(models.Model):
 
     trip = models.ForeignKey(Trip, on_delete=models.CASCADE, related_name='driving_events')
     event_type = models.CharField(max_length=20, choices=EVENT_TYPES)
-    timestamp = models.DateTimeField(auto_now_add=True)
+    timestamp = models.DateTimeField()
+    latitude = models.FloatField(null=True, blank=True)
+    longitude = models.FloatField(null=True, blank=True)
     severity = models.CharField(max_length=20, choices=SEVERITY_LEVELS, default='mild')
     speed_kmh_at_event = models.FloatField(default=0.0)
 
