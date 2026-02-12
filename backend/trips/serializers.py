@@ -12,6 +12,7 @@ class TripSerializer(serializers.ModelSerializer):
             'average_speed_kmh', 'total_distance_km',
             'harsh_braking_count', 'harsh_acceleration_count',
             'crash_detected', 'crash_latitude', 'crash_longitude',
+            'speeding_duration_seconds', 'speeding_violations_count', 'max_speed_over_limit',
             'safety_score',
         ]
         read_only_fields = ['id', 'start_time', 'average_speed_kmh', 'safety_score']

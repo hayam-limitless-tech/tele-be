@@ -20,6 +20,19 @@ def calculate_safety_score(trip):
     score -= trip.harsh_acceleration_count * penalty_per_accel
     if trip.crash_detected:
         score -= crash_penalty
+    
+    # Speeding penalties
+    # 1 point per 30 seconds of speeding (max 20 points)
+    speeding_minutes = trip.speeding_duration_seconds / 60.0
+    speeding_penalty = min(20, speeding_minutes / 0.5)  # 1 point per 30 seconds
+    score -= speeding_penalty
+    
+    # Additional penalty based on how much over the limit
+    if trip.max_speed_over_limit > 0:
+        # 1 point per 5 km/h over limit (max 10 points)
+        excess_penalty = min(10, trip.max_speed_over_limit / 5.0)
+        score -= excess_penalty
+    
     # Penalty for high average speed (e.g. over 90 km/h)
     if trip.average_speed_kmh and trip.average_speed_kmh > 90:
         score -= min(20, (trip.average_speed_kmh - 90) * 0.5)
@@ -74,6 +87,12 @@ class TripDetailView(APIView):
             trip.crash_latitude = data['crash_latitude']
         if 'crash_longitude' in data:
             trip.crash_longitude = data['crash_longitude']
+        if 'speeding_duration_seconds' in data:
+            trip.speeding_duration_seconds = data['speeding_duration_seconds']
+        if 'speeding_violations_count' in data:
+            trip.speeding_violations_count = data['speeding_violations_count']
+        if 'max_speed_over_limit' in data:
+            trip.max_speed_over_limit = data['max_speed_over_limit']
         
         # Process harsh events array if provided
         if 'harsh_events' in data:

@@ -18,6 +18,9 @@ class Trip(models.Model):
     crash_detected = models.BooleanField(default=False)
     crash_latitude = models.FloatField(null=True, blank=True)
     crash_longitude = models.FloatField(null=True, blank=True)
+    speeding_duration_seconds = models.IntegerField(default=0)  # Total time spent speeding
+    speeding_violations_count = models.IntegerField(default=0)  # Number of speeding incidents
+    max_speed_over_limit = models.FloatField(default=0.0)  # Highest km/h over limit
     safety_score = models.FloatField(null=True, blank=True)
 
     class Meta:
