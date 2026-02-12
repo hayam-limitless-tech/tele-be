@@ -29,7 +29,7 @@ async function addDrivingEvent(tripId, eventType, severity, speedKmhAtEvent) {
   return data;
 }
 
-async function endTrip(tripId, endLatitude, endLongitude, endTimeIso, averageSpeedKmh, totalDistanceKm, harshBrakingCount, harshAccelerationCount, crashDetected, crashLatitude, crashLongitude, harshEvents) {
+async function endTrip(tripId, endLatitude, endLongitude, endTimeIso, averageSpeedKmh, totalDistanceKm, harshBrakingCount, harshAccelerationCount, crashDetected, crashLatitude, crashLongitude, harshEvents, speedingDurationSeconds, speedingViolationsCount, maxSpeedOverLimit) {
   const payload = {
     end_latitude: endLatitude,
     end_longitude: endLongitude,
@@ -40,6 +40,9 @@ async function endTrip(tripId, endLatitude, endLongitude, endTimeIso, averageSpe
     harsh_acceleration_count: harshAccelerationCount,
     crash_detected: crashDetected,
     harsh_events: harshEvents || [], // Array of harsh events with locations
+    speeding_duration_seconds: speedingDurationSeconds || 0,
+    speeding_violations_count: speedingViolationsCount || 0,
+    max_speed_over_limit: maxSpeedOverLimit || 0,
   };
   
   // Only include crash location if crash was detected

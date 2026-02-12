@@ -18,6 +18,8 @@ import {
   addLocationPoint,
   endTrip,
 } from './api';
+// @ts-ignore - JavaScript module without type declarations
+import { getSpeedLimitCached } from './speedLimitService';
 
 type TripStatus = 'idle' | 'driving';
 
@@ -42,13 +44,20 @@ function App() {
   const lastHarshAccelTimeRef = useRef<number>(0); // Last harsh accel timestamp (for cooldown)
   const harshBrakeCountRef = useRef<number>(0); // Harsh brake count for callback access
   const harshAccelCountRef = useRef<number>(0); // Harsh accel count for callback access
-  const harshEventsRef = useRef<Array<{type: string, timestamp: string, latitude: number, longitude: number, speed: number}>>>([]); // Array of harsh events with locations
+  const harshEventsRef = useRef<Array<{type: string; timestamp: string; latitude: number; longitude: number; speed: number}>>([]); // Array of harsh events with locations
   const accelerometerMagnitudeRef = useRef<number>(9.8); // Latest |a| for harsh event detection
   const crashDetectedRef = useRef<boolean>(false); // Crash detected flag
   const crashLatRef = useRef<number | null>(null); // Crash latitude
   const crashLngRef = useRef<number | null>(null); // Crash longitude
   const speedBasedCrashRef = useRef<boolean>(false); // Speed indicates crash
   const sensorBasedCrashRef = useRef<boolean>(false); // Sensor indicates crash
+  const speedingDurationRef = useRef<number>(0); // Total seconds spent speeding
+  const speedingViolationsRef = useRef<number>(0); // Number of speeding incidents
+  const maxSpeedOverLimitRef = useRef<number>(0); // Max km/h over limit
+  const lastSpeedCheckTimeRef = useRef<number>(0); // Last time we checked speed limit
+  const currentSpeedLimitRef = useRef<number | null>(null); // Current road speed limit
+  const wasSpeedingRef = useRef<boolean>(false); // Was speeding in last check
+  const speedingStartTimeRef = useRef<number | null>(null); // When current speeding started
 
   // --- EFFECT 1: Permission flow (runs once on mount) ---
   useEffect(() => {
@@ -114,7 +123,6 @@ function App() {
       desiredAccuracy: BackgroundGeolocation.DesiredAccuracy.High,
       stopOnTerminate: false,
       debug: false,
-      logLevel: BackgroundGeolocation.LOG_LEVEL_OFF,
     } as Parameters<typeof BackgroundGeolocation.ready>[0]).then(() => {
       // Start location tracking
       BackgroundGeolocation.start().then(() => {
@@ -241,6 +249,49 @@ function App() {
           speedBasedCrashRef.current = false;
           sensorBasedCrashRef.current = false;
         }
+        
+        // Speed limit checking (every 10 seconds)
+        const timeSinceLastCheck = time - lastSpeedCheckTimeRef.current;
+        if (timeSinceLastCheck >= 10000) { // 10 seconds
+          lastSpeedCheckTimeRef.current = time;
+          
+          // Fetch speed limit for current location
+          getSpeedLimitCached(latitude, longitude).then((limitData: any) => {
+            currentSpeedLimitRef.current = limitData.speedLimit;
+            
+            // Check if currently speeding (5 km/h tolerance)
+            const tolerance = 5;
+            const isSpeeding = speed > (limitData.speedLimit + tolerance);
+            
+            if (isSpeeding && !wasSpeedingRef.current) {
+              // Started speeding
+              wasSpeedingRef.current = true;
+              speedingStartTimeRef.current = time;
+              speedingViolationsRef.current += 1;
+            } else if (!isSpeeding && wasSpeedingRef.current) {
+              // Stopped speeding - calculate duration
+              wasSpeedingRef.current = false;
+              if (speedingStartTimeRef.current) {
+                const duration = (time - speedingStartTimeRef.current) / 1000; // seconds
+                speedingDurationRef.current += duration;
+                speedingStartTimeRef.current = null;
+              }
+            }
+            
+            // Track max speed over limit
+            if (isSpeeding) {
+              const overLimit = speed - limitData.speedLimit;
+              if (overLimit > maxSpeedOverLimitRef.current) {
+                maxSpeedOverLimitRef.current = overLimit;
+              }
+            }
+            
+            // Log for debugging (optional)
+            console.log(`Speed: ${speed.toFixed(1)} km/h, Limit: ${limitData.speedLimit} km/h (${limitData.source}), Road: ${limitData.roadType || 'unknown'}`);
+          }).catch((err: any) => {
+            console.warn('Speed limit check failed:', err);
+          });
+        }
       }
     });
 
@@ -336,6 +387,13 @@ function App() {
       crashLngRef.current = null;
       speedBasedCrashRef.current = false;
       sensorBasedCrashRef.current = false;
+      speedingDurationRef.current = 0;
+      speedingViolationsRef.current = 0;
+      maxSpeedOverLimitRef.current = 0;
+      lastSpeedCheckTimeRef.current = 0;
+      currentSpeedLimitRef.current = null;
+      wasSpeedingRef.current = false;
+      speedingStartTimeRef.current = null;
       setStatus('driving');
       setSafetyScore(null);
       setHarshBrakeCount(0);
@@ -358,6 +416,15 @@ function App() {
     }
     try {
       BackgroundGeolocation.stop(); // Stop location updates
+      
+      // Finalize speeding duration if currently speeding
+      if (wasSpeedingRef.current && speedingStartTimeRef.current) {
+        const now = new Date().getTime();
+        const duration = (now - speedingStartTimeRef.current) / 1000;
+        speedingDurationRef.current += duration;
+        wasSpeedingRef.current = false;
+      }
+      
       const avgSpeed =
         speedCountRef.current > 0
           ? speedSumRef.current / speedCountRef.current
@@ -382,7 +449,10 @@ function App() {
         crashDetectedRef.current,
         crashLatRef.current,
         crashLngRef.current,
-        harshEventsRef.current // Send harsh events array with locations
+        harshEventsRef.current, // Send harsh events array with locations
+        Math.round(speedingDurationRef.current), // Total speeding duration in seconds
+        speedingViolationsRef.current, // Number of speeding violations
+        Math.round(maxSpeedOverLimitRef.current * 10) / 10 // Max km/h over limit
       );
       setSafetyScore(ended.safety_score ?? 0); // Backend computes score from events + speed
       setStatus('idle');
