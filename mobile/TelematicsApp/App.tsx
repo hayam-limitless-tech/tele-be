@@ -12,7 +12,7 @@ import {
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import BackgroundGeolocation from 'react-native-background-geolocation';
-import { accelerometer } from 'react-native-sensors';
+import { accelerometer, setUpdateIntervalForType, SensorTypes } from 'react-native-sensors';
 import {
   createTrip,
   addLocationPoint,
@@ -42,6 +42,7 @@ function App() {
   const lastHarshAccelTimeRef = useRef<number>(0); // Last harsh accel timestamp (for cooldown)
   const harshBrakeCountRef = useRef<number>(0); // Harsh brake count for callback access
   const harshAccelCountRef = useRef<number>(0); // Harsh accel count for callback access
+  const harshEventsRef = useRef<Array<{type: string, timestamp: string, latitude: number, longitude: number, speed: number}>>>([]); // Array of harsh events with locations
   const accelerometerMagnitudeRef = useRef<number>(9.8); // Latest |a| for harsh event detection
   const crashDetectedRef = useRef<boolean>(false); // Crash detected flag
   const crashLatRef = useRef<number | null>(null); // Crash latitude
@@ -105,18 +106,27 @@ function App() {
       foregroundService: true,
       notification: {
         priority: BackgroundGeolocation.NotificationPriority.Min,
-        title: 'Trip in progress',
-        text: 'Recording your trip',
+        title: 'Telematics Safety',
+        text: 'Waiting for GPS signal...',
       },
       distanceFilter: 0,
       locationUpdateInterval: 1000,
       desiredAccuracy: BackgroundGeolocation.DesiredAccuracy.High,
       stopOnTerminate: false,
-    } as Parameters<typeof BackgroundGeolocation.ready>[0]);
+      debug: false,
+      logLevel: BackgroundGeolocation.LOG_LEVEL_OFF,
+    } as Parameters<typeof BackgroundGeolocation.ready>[0]).then(() => {
+      // Start location tracking
+      BackgroundGeolocation.start().then(() => {
+        setError('GPS tracking started. Waiting for location fix...');
+      }).catch((err) => {
+        setError(`Failed to start GPS: ${err.message}`);
+      });
+    });
 
     // Subscribe to location updates (~every 1s). Called even when app is in background.
     const subscription = BackgroundGeolocation.onLocation((location) => {
-      setError(null); // Clear any previous error
+      setError(null); // Clear error once we get first location
       const latitude = location.coords.latitude;
       const longitude = location.coords.longitude;
       const time = new Date(location.timestamp).getTime(); // ms for arithmetic
@@ -155,11 +165,13 @@ function App() {
             const accelMagnitude = accelerometerMagnitudeRef.current;
             const sensorFlagged = accelMagnitude > 13; // m/s²
             
-            // Speed-based signals
+            // Speed-based signals (percentage-based: 30% change)
             const speedDrop = prevSpeed - speed;
             const speedRise = speed - prevSpeed;
-            const speedFlaggedBrake = speedDrop >= 15;
-            const speedFlaggedAccel = speedRise >= 15;
+            const speedDropPercent = prevSpeed > 0 ? (speedDrop / prevSpeed) * 100 : 0;
+            const speedRisePercent = prevSpeed > 0 ? (speedRise / prevSpeed) * 100 : 0;
+            const speedFlaggedBrake = speedDropPercent >= 30; // 30% speed drop
+            const speedFlaggedAccel = speedRisePercent >= 30; // 30% speed rise
             
             // Decision logic: both sources must agree; sensor has priority when GPS spotty
             let countBrake = false;
@@ -190,11 +202,27 @@ function App() {
               harshBrakeCountRef.current += 1;
               setHarshBrakeCount(harshBrakeCountRef.current);
               lastHarshBrakeTimeRef.current = now;
+              // Store event with location and timestamp
+              harshEventsRef.current.push({
+                type: 'braking',
+                timestamp: new Date(now).toISOString(),
+                latitude,
+                longitude,
+                speed
+              });
             }
             if (countAccel && now - lastHarshAccelTimeRef.current >= 3000) {
               harshAccelCountRef.current += 1;
               setHarshAccelerationCount(harshAccelCountRef.current);
               lastHarshAccelTimeRef.current = now;
+              // Store event with location and timestamp
+              harshEventsRef.current.push({
+                type: 'acceleration',
+                timestamp: new Date(now).toISOString(),
+                latitude,
+                longitude,
+                speed
+              });
             }
           }
           
@@ -223,6 +251,9 @@ function App() {
 
   // --- EFFECT 3: Accelerometer subscription (runs once on mount) ---
   useEffect(() => {
+    // Set update interval to 100ms (10 Hz) - sufficient for crash detection
+    setUpdateIntervalForType(SensorTypes.accelerometer, 100);
+    
     let crashTimeout: ReturnType<typeof setTimeout> | null = null;
     
     const subscription = accelerometer.subscribe(({ x, y, z }) => {
@@ -297,6 +328,7 @@ function App() {
       speedCountRef.current = 0;
       harshBrakeCountRef.current = 0;
       harshAccelCountRef.current = 0;
+      harshEventsRef.current = []; // Reset harsh events array
       lastHarshBrakeTimeRef.current = 0;
       lastHarshAccelTimeRef.current = 0;
       crashDetectedRef.current = false;
@@ -349,12 +381,14 @@ function App() {
         harshAccelCountRef.current,
         crashDetectedRef.current,
         crashLatRef.current,
-        crashLngRef.current
+        crashLngRef.current,
+        harshEventsRef.current // Send harsh events array with locations
       );
       setSafetyScore(ended.safety_score ?? 0); // Backend computes score from events + speed
       setStatus('idle');
       tripIdRef.current = null; // onLocation will no longer store points
       tripLocationBuffer.current = []; // Clear in-memory buffer
+      harshEventsRef.current = []; // Clear harsh events array
     } catch (e: any) {
       setError(e?.message || 'Failed to end trip');
     }
