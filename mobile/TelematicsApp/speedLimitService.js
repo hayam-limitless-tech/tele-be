@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { API_BASE } = require('./api');
 
 /**
  * Lebanon legal speed limits based on road classification
@@ -18,12 +19,40 @@ const LEBANON_LEGAL_LIMITS = {
 };
 
 /**
+ * Fetch speed limit from backend (Railway). Backend calls Google Roads API with key from env.
+ * Returns result object or null on error / no key / no data (then we use OSM).
+ */
+async function getSpeedLimitBackend(latitude, longitude) {
+  try {
+    const response = await axios.get(`${API_BASE}/speed-limit/`, {
+      params: { lat: latitude, lng: longitude },
+      timeout: 5000,
+    });
+    if (response.data && response.data.speedLimit != null) {
+      return response.data;
+    }
+    return null;
+  } catch (err) {
+    if (err.response?.status === 503) {
+      console.warn('Speed limit backend: API key not configured. Using OSM.');
+    } else if (err.response?.status !== 404 && err.response?.status !== 502) {
+      console.warn('Speed limit backend failed:', err.message);
+    }
+    return null;
+  }
+}
+
+/**
  * Fetch road data from OSM and determine speed limit
  * @param {number} latitude
  * @param {number} longitude
  * @returns {Promise<{speedLimit: number, source: string, osmSpeed: number|null, roadType: string|null}>}
  */
 async function getSpeedLimit(latitude, longitude) {
+  // Try backend first (Google via Railway); fall back to OSM if no key or error
+  const backendResult = await getSpeedLimitBackend(latitude, longitude);
+  if (backendResult) return backendResult;
+
   try {
     // Query Overpass API for roads near this location
     // Get ALL roads in 50m radius (with or without maxspeed)

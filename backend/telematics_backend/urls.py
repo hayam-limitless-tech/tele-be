@@ -16,8 +16,10 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
+from trips.views import SpeedLimitView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('api/speed-limit/', SpeedLimitView.as_view()),
     path('api/trips/', include('trips.urls')),
 ]

@@ -1,3 +1,8 @@
+import json
+import os
+import urllib.error
+import urllib.parse
+import urllib.request
 from django.shortcuts import render
 
 # Create your views here.
@@ -7,6 +12,59 @@ from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from .models import Trip, LocationPoint, DrivingEvent
 from .serializers import TripSerializer, LocationPointSerializer, DrivingEventSerializer
+
+GOOGLE_ROADS_SPEED_LIMITS_URL = 'https://roads.googleapis.com/v1/speedLimits'
+
+
+class SpeedLimitView(APIView):
+    """
+    GET ?lat=...&lng=... → proxy to Google Roads API Speed Limits.
+    API key is read from GOOGLE_MAPS_API_KEY env (e.g. on Railway).
+    Returns same shape as mobile expects: { speedLimit, source, ... } or 404.
+    """
+
+    def get(self, request):
+        api_key = os.environ.get('GOOGLE_MAPS_API_KEY', '').strip()
+        if not api_key:
+            return Response(
+                {'detail': 'Google Maps API key not configured'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        lat = request.query_params.get('lat')
+        lng = request.query_params.get('lng')
+        if lat is None or lng is None:
+            return Response(
+                {'detail': 'lat and lng query parameters required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            path = f'{lat},{lng}'
+            url = f'{GOOGLE_ROADS_SPEED_LIMITS_URL}?path={urllib.parse.quote(path)}&units=KPH&key={urllib.parse.quote(api_key)}'
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode())
+        except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError, OSError) as e:
+            return Response(
+                {'detail': str(getattr(e, 'reason', e))},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        speed_limits = data.get('speedLimits') or []
+        if not speed_limits or speed_limits[0].get('speedLimit') is None:
+            return Response(
+                {'detail': 'No speed limit data for this location'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        item = speed_limits[0]
+        value = item['speedLimit']
+        units = (item.get('units') or 'KPH').upper()
+        speed_kmh = round(value * 1.60934) if units == 'MPH' else value
+        return Response({
+            'speedLimit': speed_kmh,
+            'source': 'google',
+            'osmSpeed': None,
+            'roadType': None,
+            'legalLimit': speed_kmh,
+        })
 
 
 def calculate_safety_score(trip):

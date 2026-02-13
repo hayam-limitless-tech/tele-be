@@ -11,7 +11,7 @@ import {
   Linking,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import BackgroundGeolocation from 'react-native-background-geolocation';
+import Geolocation from 'react-native-geolocation-service';
 import { accelerometer, setUpdateIntervalForType, SensorTypes } from 'react-native-sensors';
 import {
   createTrip,
@@ -20,6 +20,7 @@ import {
 } from './api';
 // @ts-ignore - JavaScript module without type declarations
 import { getSpeedLimitCached } from './speedLimitService';
+import { startForegroundService, stopForegroundService } from './ForegroundService';
 
 type TripStatus = 'idle' | 'driving';
 
@@ -34,6 +35,7 @@ function App() {
   const [harshAccelerationCount, setHarshAccelerationCount] = useState(0);
   const [currentSpeedLimit, setCurrentSpeedLimit] = useState<number | null>(null);
   const [speedingViolations, setSpeedingViolations] = useState(0);
+  const [isStartingTrip, setIsStartingTrip] = useState(false);
 
   // --- REFS (persist across renders, used in callbacks without causing re-renders) ---
   const tripIdRef = useRef<number | null>(null); // Backend trip ID when driving
@@ -60,6 +62,7 @@ function App() {
   const currentSpeedLimitRef = useRef<number | null>(null); // Current road speed limit
   const wasSpeedingRef = useRef<boolean>(false); // Was speeding in last check
   const speedingStartTimeRef = useRef<number | null>(null); // When current speeding started
+  const watchIdRef = useRef<number | null>(null); // Geolocation watch ID for cleanup
 
   // --- EFFECT 1: Permission flow (runs once on mount) ---
   useEffect(() => {
@@ -97,6 +100,21 @@ function App() {
             buttonPositive: 'OK',
           }
         );
+        // Step 3: Request notification permission (Android 13+); required before showing trip notification
+        const apiLevel = Platform.OS === 'android' ? (Platform as any).Version : 0;
+        if (apiLevel >= 33) {
+          await PermissionsAndroid.request(
+            (PermissionsAndroid as any).PERMISSIONS?.POST_NOTIFICATIONS ??
+              'android.permission.POST_NOTIFICATIONS',
+            {
+              title: 'Notification permission',
+              message: 'Show a notification while a trip is being recorded.',
+              buttonNeutral: 'Ask Me Later',
+              buttonNegative: 'Cancel',
+              buttonPositive: 'OK',
+            }
+          );
+        }
         if (!cancelled) {
           setPermissionGranted(true); // Proceed even if background denied; app still works
         }
@@ -108,38 +126,29 @@ function App() {
     return () => { cancelled = true; }; // Cleanup: avoid setState on unmounted component
   }, []);
 
-  // --- EFFECT 2: Configure BackgroundGeolocation and subscribe to location (runs when permission granted) ---
+  // --- EFFECT 2: Start Geolocation tracking (runs when permission granted) ---
   useEffect(() => {
     if (!permissionGranted) return;
 
-    // Configure the library: 1s interval (iOS: no notification; Android: low-priority notification), high accuracy
-    BackgroundGeolocation.ready({
-      foregroundService: true,
-      notification: {
-        priority: BackgroundGeolocation.NotificationPriority.Min,
-        title: 'Telematics Safety',
-        text: 'Waiting for GPS signal...',
-      },
-      distanceFilter: 0,
-      locationUpdateInterval: 1000,
-      desiredAccuracy: BackgroundGeolocation.DesiredAccuracy.High,
-      stopOnTerminate: false,
-      debug: false,
-    } as Parameters<typeof BackgroundGeolocation.ready>[0]).then(() => {
-      // Start location tracking
-      BackgroundGeolocation.start().then(() => {
-        setError('GPS tracking started. Waiting for location fix...');
-      }).catch((err) => {
-        setError(`Failed to start GPS: ${err.message}`);
-      });
-    });
+    setError(null);
 
-    // Subscribe to location updates (~every 1s). Called even when app is in background.
-    const subscription = BackgroundGeolocation.onLocation((location) => {
-      setError(null); // Clear error once we get first location
+    let watchId: number | null = null;
+    let cancelled = false;
+
+    const startWatching = () => {
+      if (cancelled) return;
+      try {
+        watchId = Geolocation.watchPosition(
+      (position) => {
+        // Location update callback - same logic as before
+        const location = {
+          coords: position.coords,
+          timestamp: position.timestamp,
+        };
+        setError(null); // Clear error once we get first location
       const latitude = location.coords.latitude;
       const longitude = location.coords.longitude;
-      const time = new Date(location.timestamp).getTime(); // ms for arithmetic
+        const time = new Date(location.timestamp).getTime(); // ms for arithmetic
 
       // Compute speed from distance between this point and previous
       const prev = lastLocationRef.current;
@@ -159,7 +168,7 @@ function App() {
           prevSpeed = buffer[buffer.length - 1].speed;
         }
       }
-      lastLocationRef.current = { lat: latitude, lng: longitude, time };
+        lastLocationRef.current = { lat: latitude, lng: longitude, time };
 
       // If we're on an active trip, store this point in memory and detect harsh events
       if (tripIdRef.current != null) {
@@ -297,21 +306,64 @@ function App() {
           });
         }
       }
-    });
+      },
+      (error) => {
+        setError(`Location error: ${error.message}`);
+        console.error('Geolocation error:', error);
+      },
+      Platform.OS === 'android'
+        ? {
+            enableHighAccuracy: true,
+            distanceFilter: 0,
+            interval: 1000,
+            fastestInterval: 1000,
+            showLocationDialog: false,
+            forceRequestLocation: false,
+            forceLocationManager: true, // Use legacy API; avoids Fused Location Provider crashes on some devices
+          }
+        : {
+            enableHighAccuracy: true,
+            distanceFilter: 0,
+            interval: 1000,
+            fastestInterval: 1000,
+            showsBackgroundLocationIndicator: true,
+          }
+    );
+        watchIdRef.current = watchId;
+      } catch (e) {
+        console.error('Geolocation.watchPosition failed', e);
+        setError(`Failed to start location: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    };
+
+    // Defer so we're not in the same tick as permission state update
+    const t = setTimeout(startWatching, 100);
 
     return () => {
-      subscription.remove(); // Unsubscribe when permission revoked or component unmounts
+      cancelled = true;
+      clearTimeout(t);
+      if (watchIdRef.current !== null) {
+        try {
+          Geolocation.clearWatch(watchIdRef.current);
+        } catch (_e) {}
+        watchIdRef.current = null;
+      }
     };
   }, [permissionGranted]);
 
   // --- EFFECT 3: Accelerometer subscription (runs once on mount) ---
   useEffect(() => {
-    // Set update interval to 100ms (10 Hz) - sufficient for crash detection
-    setUpdateIntervalForType(SensorTypes.accelerometer, 100);
-    
+    let subscription: { unsubscribe: () => void } | null = null;
     let crashTimeout: ReturnType<typeof setTimeout> | null = null;
-    
-    const subscription = accelerometer.subscribe(({ x, y, z }) => {
+
+    try {
+      setUpdateIntervalForType(SensorTypes.accelerometer, 200);
+    } catch (e) {
+      console.warn('Accelerometer setUpdateIntervalForType failed', e);
+    }
+
+    try {
+      subscription = accelerometer.subscribe(({ x, y, z }) => {
       // Compute magnitude: |a| = sqrt(x² + y² + z²), orientation-invariant
       const magnitude = Math.sqrt(x * x + y * y + z * z);
       accelerometerMagnitudeRef.current = magnitude;
@@ -326,9 +378,14 @@ function App() {
         }, 200);
       }
     });
+    } catch (e) {
+      console.warn('Accelerometer subscribe failed', e);
+    }
 
     return () => {
-      subscription.unsubscribe(); // Cleanup on unmount
+      try {
+        if (subscription) subscription.unsubscribe();
+      } catch (_e) {}
       if (crashTimeout) clearTimeout(crashTimeout);
     };
   }, []);
@@ -361,20 +418,29 @@ function App() {
     if (batteryPromptShownRef.current) return;
     batteryPromptShownRef.current = true;
     Alert.alert(
-      'Required for tracking',
-      'Turn off battery optimization for reliable tracking when the app is in the background. You must open settings to continue.',
-      [{ text: 'Open settings', onPress: () => Linking.openSettings() }]
+      'Important: Battery Settings Required',
+      'For accurate trip tracking in the background:\n\n' +
+      '1. Tap "Open Settings" below\n' +
+      '2. Find "Telematics Safety" in the app list\n' +
+      '3. Tap "Battery"\n' +
+      '4. Select "Unrestricted" or "Don\'t optimize"\n' +
+      '5. Go back to the app\n\n' +
+      'Without this, trips may not track correctly when your screen is off.',
+      [{ text: 'Open Settings', onPress: () => Linking.openSettings() }],
+      { cancelable: false }
     );
   }
 
   /** Start a new trip: create on backend, set tripId, start tracking, show battery prompt. */
   async function handleStartTrip() {
+    if (isStartingTrip) return; // Prevent double-tap and multiple trips
     setError(null);
     const pos = lastLocationRef.current;
     if (!pos) {
       setError('Wait for location'); // Need at least one location before starting
       return;
     }
+    setIsStartingTrip(true);
     try {
       const trip = await createTrip(pos.lat, pos.lng); // POST /api/trips/
       tripIdRef.current = trip.id; // From now on, onLocation will store points in memory
@@ -404,10 +470,20 @@ function App() {
       setHarshAccelerationCount(0);
       setCurrentSpeedLimit(null);
       setSpeedingViolations(0);
-      BackgroundGeolocation.start(); // Start receiving location updates (continues in background)
-      if (Platform.OS === 'android') showBatteryPrompt();
+      // GPS is already running from app initialization
+      
+      if (Platform.OS === 'android') {
+        try {
+          await startForegroundService();
+        } catch (_e) {
+          // Notification is optional; trip still works without it
+        }
+        showBatteryPrompt();
+      }
     } catch (e: any) {
       setError(e?.message || 'Failed to start trip');
+    } finally {
+      setIsStartingTrip(false);
     }
   }
 
@@ -421,7 +497,7 @@ function App() {
       return;
     }
     try {
-      BackgroundGeolocation.stop(); // Stop location updates
+      // Don't stop GPS - keep it running for next trip and to maintain location display
       
       // Finalize speeding duration if currently speeding
       if (wasSpeedingRef.current && speedingStartTimeRef.current) {
@@ -465,6 +541,12 @@ function App() {
       tripIdRef.current = null; // onLocation will no longer store points
       tripLocationBuffer.current = []; // Clear in-memory buffer
       harshEventsRef.current = []; // Clear harsh events array
+      
+      if (Platform.OS === 'android') {
+        try {
+          await stopForegroundService();
+        } catch (_e) {}
+      }
     } catch (e: any) {
       setError(e?.message || 'Failed to end trip');
     }
@@ -515,8 +597,12 @@ function App() {
         {error != null && <Text style={styles.error}>{error}</Text>}
         <View style={styles.buttons}>
           {status === 'idle' ? (
-            <TouchableOpacity style={styles.button} onPress={handleStartTrip}>
-              <Text style={styles.buttonText}>Start trip</Text>
+            <TouchableOpacity
+              style={[styles.button, isStartingTrip && styles.buttonDisabled]}
+              onPress={handleStartTrip}
+              disabled={isStartingTrip}
+            >
+              <Text style={styles.buttonText}>{isStartingTrip ? 'Starting…' : 'Start trip'}</Text>
             </TouchableOpacity>
           ) : (
             <TouchableOpacity style={[styles.button, styles.buttonEnd]} onPress={handleEndTrip}>
@@ -572,6 +658,9 @@ const styles = StyleSheet.create({
     padding: 16,
     borderRadius: 8,
     alignItems: 'center',
+  },
+  buttonDisabled: {
+    opacity: 0.6,
   },
   buttonEnd: {
     backgroundColor: '#d32f2f',
