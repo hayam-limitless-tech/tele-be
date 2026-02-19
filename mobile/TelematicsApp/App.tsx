@@ -63,6 +63,9 @@ function App() {
   const wasSpeedingRef = useRef<boolean>(false); // Was speeding in last check
   const speedingStartTimeRef = useRef<number | null>(null); // When current speeding started
   const watchIdRef = useRef<number | null>(null); // Geolocation watch ID for cleanup
+  const smoothedSpeedRef = useRef<number>(0); // Exponential moving average for display (reduces GPS jitter)
+  const recentSpeedSamplesRef = useRef<Array<{ speedKmh: number; time: number }>>([]); // Last ~30s for auto-start
+  const autoStartInProgressRef = useRef<boolean>(false); // Prevent double auto-start while handleStartTrip runs
 
   // --- EFFECT 1: Permission flow (runs once on mount) ---
   useEffect(() => {
@@ -140,39 +143,86 @@ function App() {
       try {
         watchId = Geolocation.watchPosition(
       (position) => {
-        // Location update callback - same logic as before
+        // Location update callback - same logic as before (accept coerced numbers for emulator)
+        const coords = position?.coords;
+        const lat = coords?.latitude != null ? Number(coords.latitude) : NaN;
+        const lng = coords?.longitude != null ? Number(coords.longitude) : NaN;
+        if (Number.isNaN(lat) || Number.isNaN(lng)) return;
+        const latitude = lat;
+        const longitude = lng;
         const location = {
-          coords: position.coords,
+          coords: { ...coords, latitude, longitude },
           timestamp: position.timestamp,
         };
         setError(null); // Clear error once we get first location
-      const latitude = location.coords.latitude;
-      const longitude = location.coords.longitude;
-        const time = new Date(location.timestamp).getTime(); // ms for arithmetic
+        const ts = location.timestamp;
+        const time = typeof ts === 'number' ? (ts < 1e12 ? ts * 1000 : ts) : Date.now();
 
-      // Compute speed from distance between this point and previous
+      // Speed: prefer device coords.speed (m/s); else computed from GPS with thresholds to avoid jitter when stationary
       const prev = lastLocationRef.current;
+      const timeDeltaMs = prev ? time - prev.time : 0;
+      const accuracy = location.coords.accuracy ?? 999;
+      const coordsSpeedMs = (location.coords as { speed?: number | null }).speed;
+      const coordsSpeedKmh = coordsSpeedMs != null && coordsSpeedMs >= 0 ? coordsSpeedMs * 3.6 : null;
+
       let speed = 0;
       let prevSpeed = 0;
-      if (prev) {
+      if (coordsSpeedKmh != null) {
+        speed = coordsSpeedKmh;
+      } else if (prev && timeDeltaMs >= 1500) {
         const distKm = distanceKm(prev.lat, prev.lng, latitude, longitude);
-        const timeHours = (time - prev.time) / 1000 / 3600;
-        speed = timeHours > 0 ? distKm / timeHours : 0;
-        setSpeedKmh(Math.round(speed * 10) / 10);
-        speedSumRef.current += speed; // Accumulate for average at end of trip
-        speedCountRef.current += 1;
-        
-        // Get previous speed from buffer (if available)
-        const buffer = tripLocationBuffer.current;
-        if (buffer.length > 0) {
-          prevSpeed = buffer[buffer.length - 1].speed;
+        const timeHours = timeDeltaMs / 1000 / 3600;
+        const accuracyOk = accuracy <= 35 || accuracy > 500; // Allow when good or when unknown/emulator (no fix)
+        if (timeHours > 0 && distKm >= 0.015 && accuracyOk) {
+          speed = distKm / timeHours;
         }
       }
+
+      const rawSpeed = speed;
+      const alpha = 0.35;
+      smoothedSpeedRef.current = smoothedSpeedRef.current * (1 - alpha) + speed * alpha;
+      if (speed < 2) smoothedSpeedRef.current = speed;
+      const displaySpeed = Math.round(smoothedSpeedRef.current * 10) / 10;
+      setSpeedKmh(displaySpeed);
+      if (tripIdRef.current != null) {
+        speedSumRef.current += rawSpeed;
+        speedCountRef.current += 1;
+      }
+
+      const buffer = tripLocationBuffer.current;
+      if (buffer.length > 0) prevSpeed = buffer[buffer.length - 1].speed;
+
+      // Update lastLocationRef when position changed (or first fix), so Start trip has a location and timeDelta is correct. Always set on first fix so emulator single-point or script gets a location.
+      const minDistKm = 0.005; // ~5 m
+      const moved = !prev || distanceKm(prev.lat, prev.lng, latitude, longitude) >= minDistKm;
+      if (moved || !lastLocationRef.current) {
         lastLocationRef.current = { lat: latitude, lng: longitude, time };
+      }
+
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/8b754506-153e-4207-8319-1aa43d33ed2a',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'c1458a'},body:JSON.stringify({sessionId:'c1458a',location:'App.tsx:speed',message:'speed debug',data:{timeDeltaMs,rawSpeedKmh:rawSpeed,displaySpeedKmh:displaySpeed,coordsSpeedKmh,accuracy},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
+      // #endregion
+
+      // Auto-detect car ride: when idle, sustained speed > 15 km/h for 10+ seconds starts trip
+      if (tripIdRef.current == null && !autoStartInProgressRef.current) {
+        recentSpeedSamplesRef.current.push({ speedKmh: rawSpeed, time });
+        const windowMs = 30000;
+        const now = time;
+        recentSpeedSamplesRef.current = recentSpeedSamplesRef.current.filter((s) => now - s.time <= windowMs);
+        const recent = recentSpeedSamplesRef.current;
+        const last10 = recent.filter((s) => now - s.time <= 12000);
+        if (last10.length >= 3) {
+          const avg = last10.reduce((a, s) => a + s.speedKmh, 0) / last10.length;
+          if (avg >= 15) {
+            autoStartInProgressRef.current = true;
+            handleStartTrip();
+          }
+        }
+      }
 
       // If we're on an active trip, store this point in memory and detect harsh events
       if (tripIdRef.current != null) {
-        tripLocationBuffer.current.push({ lat: latitude, lng: longitude, time, speed });
+        tripLocationBuffer.current.push({ lat: latitude, lng: longitude, time, speed: rawSpeed });
         
         // Harsh braking/acceleration detection (speed + accelerometer, Phase 3)
         if (prev && speedCountRef.current >= 2) {
@@ -185,8 +235,8 @@ function App() {
             const sensorFlagged = accelMagnitude > 13; // m/s²
             
             // Speed-based signals (percentage-based: 30% change)
-            const speedDrop = prevSpeed - speed;
-            const speedRise = speed - prevSpeed;
+            const speedDrop = prevSpeed - rawSpeed;
+            const speedRise = rawSpeed - prevSpeed;
             const speedDropPercent = prevSpeed > 0 ? (speedDrop / prevSpeed) * 100 : 0;
             const speedRisePercent = prevSpeed > 0 ? (speedRise / prevSpeed) * 100 : 0;
             const speedFlaggedBrake = speedDropPercent >= 30; // 30% speed drop
@@ -227,7 +277,7 @@ function App() {
                 timestamp: new Date(now).toISOString(),
                 latitude,
                 longitude,
-                speed
+                speed: rawSpeed
               });
             }
             if (countAccel && now - lastHarshAccelTimeRef.current >= 3000) {
@@ -240,13 +290,13 @@ function App() {
                 timestamp: new Date(now).toISOString(),
                 latitude,
                 longitude,
-                speed
+                speed: rawSpeed
               });
             }
           }
           
           // Crash detection (speed-based)
-          if (prev && prevSpeed >= 20 && speed < 5 && timeDeltaSec < 2) {
+          if (prev && prevSpeed >= 20 && rawSpeed < 5 && timeDeltaSec < 2) {
             speedBasedCrashRef.current = true;
           }
         }
@@ -273,7 +323,7 @@ function App() {
             
             // Check if currently speeding (5 km/h tolerance)
             const tolerance = 5;
-            const isSpeeding = speed > (limitData.speedLimit + tolerance);
+            const isSpeeding = rawSpeed > (limitData.speedLimit + tolerance);
             
             if (isSpeeding && !wasSpeedingRef.current) {
               // Started speeding
@@ -293,14 +343,14 @@ function App() {
             
             // Track max speed over limit
             if (isSpeeding) {
-              const overLimit = speed - limitData.speedLimit;
+              const overLimit = rawSpeed - limitData.speedLimit;
               if (overLimit > maxSpeedOverLimitRef.current) {
                 maxSpeedOverLimitRef.current = overLimit;
               }
             }
             
             // Log for debugging (optional)
-            console.log(`Speed: ${speed.toFixed(1)} km/h, Limit: ${limitData.speedLimit} km/h (${limitData.source}), Road: ${limitData.roadType || 'unknown'}`);
+            console.log(`Speed: ${rawSpeed.toFixed(1)} km/h, Limit: ${limitData.speedLimit} km/h (${limitData.source}), Road: ${limitData.roadType || 'unknown'}`);
           }).catch((err: any) => {
             console.warn('Speed limit check failed:', err);
           });
@@ -437,7 +487,7 @@ function App() {
     setError(null);
     const pos = lastLocationRef.current;
     if (!pos) {
-      setError('Wait for location'); // Need at least one location before starting
+      setError('Wait for location');
       return;
     }
     setIsStartingTrip(true);
@@ -484,6 +534,7 @@ function App() {
       setError(e?.message || 'Failed to start trip');
     } finally {
       setIsStartingTrip(false);
+      autoStartInProgressRef.current = false;
     }
   }
 
@@ -541,7 +592,8 @@ function App() {
       tripIdRef.current = null; // onLocation will no longer store points
       tripLocationBuffer.current = []; // Clear in-memory buffer
       harshEventsRef.current = []; // Clear harsh events array
-      
+      autoStartInProgressRef.current = false; // Allow auto-start on next drive
+
       if (Platform.OS === 'android') {
         try {
           await stopForegroundService();

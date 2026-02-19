@@ -43,9 +43,20 @@ class SpeedLimitView(APIView):
             req = urllib.request.Request(url)
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read().decode())
-        except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError, OSError) as e:
+        except urllib.error.HTTPError as e:
+            # Google returned 4xx/5xx. 403/401 = key invalid or Roads API not enabled.
+            if e.code in (401, 403):
+                return Response(
+                    {'detail': 'Speed limit service unavailable (check GOOGLE_MAPS_API_KEY and enable Roads API in Google Cloud).'},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
             return Response(
-                {'detail': str(getattr(e, 'reason', e))},
+                {'detail': f'Upstream error from speed limit provider (HTTP {e.code}).'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
+            return Response(
+                {'detail': str(getattr(e, 'reason', e)) or 'Speed limit service temporarily unavailable.'},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
         speed_limits = data.get('speedLimits') or []
