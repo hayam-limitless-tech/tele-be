@@ -5,30 +5,23 @@
 # Run with: .\emulator-simulate-drive.ps1
 # Requires: emulator running, app open with location permission, adb in PATH.
 
-$points = @(
-    @{ lat = 33.8938; lng = 35.5018 },   # Start (e.g. Beirut area)
-    @{ lat = 33.8945; lng = 35.5025 },
-    @{ lat = 33.8952; lng = 35.5032 },
-    @{ lat = 33.8959; lng = 35.5040 },
-    @{ lat = 33.8966; lng = 35.5048 },
-    @{ lat = 33.8973; lng = 35.5056 },
-    @{ lat = 33.8980; lng = 35.5064 },
-    @{ lat = 33.8987; lng = 35.5072 },
-    @{ lat = 33.8994; lng = 35.5080 },
-    @{ lat = 33.9001; lng = 35.5088 },
-    @{ lat = 33.9008; lng = 35.5096 },
-    @{ lat = 33.9015; lng = 35.5104 },
-    @{ lat = 33.9022; lng = 35.5112 },
-    @{ lat = 33.9029; lng = 35.5120 },
-    @{ lat = 33.9036; lng = 35.5128 },
-    @{ lat = 33.9043; lng = 35.5136 },
-    @{ lat = 33.9050; lng = 35.5144 },
-    @{ lat = 33.9057; lng = 35.5152 },
-    @{ lat = 33.9064; lng = 35.5160 },
-    @{ lat = 33.9071; lng = 35.5168 }
-)
+$startLat = 33.8938
+$startLng = 35.5018
+$pointCount = 24
+$delaySeconds = 2
 
-$delaySeconds = 2   # ~2 s between points => ~40 s "drive", distance ~1–2 km => ~30–50 km/h computed speed
+# About 21-22 m per step at Beirut's latitude.
+# With 2 s between points, this simulates roughly 38-40 km/h.
+$stepLat = 0.00015
+$stepLng = 0.00015
+
+$points = @()
+for ($i = 0; $i -lt $pointCount; $i++) {
+    $points += @{
+        lat = [math]::Round($startLat + ($stepLat * $i), 6)
+        lng = [math]::Round($startLng + ($stepLng * $i), 6)
+    }
+}
 
 function Get-EmulatorConsolePort {
     $deviceLine = adb devices | Select-String '^emulator-(\d+)\s+device$' | Select-Object -First 1
