@@ -1,5 +1,5 @@
 const axios = require('axios');
-const { API_BASE } = require('./api');
+const { API_BASE, API_HEADERS } = require('./api');
 
 /**
  * Lebanon legal speed limits based on road classification
@@ -26,6 +26,7 @@ async function getSpeedLimitBackend(latitude, longitude) {
   try {
     const response = await axios.get(`${API_BASE}/speed-limit/`, {
       params: { lat: latitude, lng: longitude },
+      headers: API_HEADERS,
       timeout: 5000,
     });
     if (response.data && response.data.speedLimit != null) {
@@ -35,6 +36,8 @@ async function getSpeedLimitBackend(latitude, longitude) {
   } catch (err) {
     if (err.response?.status === 503) {
       console.warn('Speed limit backend: API key not configured. Using OSM.');
+    } else if (err.response?.status === 401 || err.response?.status === 403) {
+      console.warn('Speed limit backend denied request. Check mobile API key configuration.');
     } else if (err.response?.status !== 404 && err.response?.status !== 502) {
       console.warn('Speed limit backend failed:', err.message);
     }

@@ -22,20 +22,32 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-fallback-for-local-dev-only')
+def split_csv(value):
+    return [item.strip() for item in value.split(',') if item.strip()]
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
 
-ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
-if os.environ.get('RAILWAY_PUBLIC_DOMAIN'):
-    ALLOWED_HOSTS.append(os.environ.get('RAILWAY_PUBLIC_DOMAIN'))
+is_cloud_deploy = bool(os.environ.get('RAILWAY_PUBLIC_DOMAIN') or os.environ.get('DATABASE_URL'))
+default_debug = '0' if is_cloud_deploy else '1'
 
-CSRF_TRUSTED_ORIGINS = [
-    "https://tele-be-production.up.railway.app",
-    "https://tele-be-production.up.railway.app/",
-]
+# SECURITY WARNING: keep the secret key used in production secret.
+DEBUG = os.environ.get('DEBUG', default_debug).lower() in ('1', 'true', 'yes', 'on')
+SECRET_KEY = os.environ.get(
+    'SECRET_KEY',
+    'django-insecure-fallback-for-local-dev-only' if DEBUG else 'django-insecure-production-fallback-change-me',
+)
+MOBILE_API_KEY = os.environ.get(
+    'MOBILE_API_KEY',
+    'telematics-mobile-v1-rotate-me',
+)
+
+ALLOWED_HOSTS = split_csv(os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,testserver'))
+railway_public_domain = os.environ.get('RAILWAY_PUBLIC_DOMAIN')
+if railway_public_domain and railway_public_domain not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(railway_public_domain)
+
+CSRF_TRUSTED_ORIGINS = split_csv(
+    os.environ.get('CSRF_TRUSTED_ORIGINS', 'https://tele-be-production.up.railway.app')
+)
 
 
 # Application definition
@@ -53,9 +65,9 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
-    'corsheaders.middleware.CorsMiddleware',
-    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -145,4 +157,28 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-CORS_ALLOW_ALL_ORIGINS = True
+REST_FRAMEWORK = {
+    'DEFAULT_PERMISSION_CLASSES': [
+        'trips.permissions.HasMobileApiKey',
+    ],
+}
+
+CORS_ALLOWED_ORIGINS = split_csv(
+    os.environ.get(
+        'CORS_ALLOWED_ORIGINS',
+        'http://localhost:3000,http://127.0.0.1:3000,http://localhost:8081'
+        if DEBUG
+        else '',
+    )
+)
+
+if not DEBUG:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_SSL_REDIRECT = os.environ.get('SECURE_SSL_REDIRECT', '1').lower() in (
+        '1',
+        'true',
+        'yes',
+        'on',
+    )

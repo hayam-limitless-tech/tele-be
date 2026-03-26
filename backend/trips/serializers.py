@@ -22,7 +22,7 @@ class LocationPointSerializer(serializers.ModelSerializer):
     class Meta:
         model = LocationPoint
         fields = ['id', 'trip', 'latitude', 'longitude', 'timestamp', 'speed_kmh', 'accuracy']
-        read_only_fields = ['id', 'timestamp']
+        read_only_fields = ['id']
 
 
 class DrivingEventSerializer(serializers.ModelSerializer):

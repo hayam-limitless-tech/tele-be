@@ -1,31 +1,71 @@
 const API_BASE = 'https://tele-be-production.up.railway.app/api';
+const MOBILE_API_KEY = 'telematics-mobile-v1-rotate-me';
 
 
 const axios = require('axios');
 
+const API_HEADERS = {
+  'X-API-Key': MOBILE_API_KEY,
+};
+
+const apiClient = axios.create({
+  baseURL: API_BASE,
+  timeout: 10000,
+  headers: API_HEADERS,
+});
+
 async function createTrip(startLatitude, startLongitude) {
-  const { data } = await axios.post(`${API_BASE}/trips/`, {
+  const { data } = await apiClient.post('/trips/', {
     start_latitude: startLatitude,
     start_longitude: startLongitude,
   });
   return data;
 }
 
-async function addLocationPoint(tripId, latitude, longitude, speedKmh) {
-  const { data } = await axios.post(`${API_BASE}/trips/${tripId}/locations/`, {
+async function addLocationPoint(tripId, latitude, longitude, speedKmh, accuracy, timestamp) {
+  const payload = {
     latitude,
     longitude,
     speed_kmh: speedKmh,
-  });
+  };
+
+  if (accuracy != null && Number.isFinite(accuracy)) {
+    payload.accuracy = accuracy;
+  }
+
+  if (timestamp) {
+    payload.timestamp = timestamp;
+  }
+
+  const { data } = await apiClient.post(`/trips/${tripId}/locations/`, payload);
   return data;
 }
 
-async function addDrivingEvent(tripId, eventType, severity, speedKmhAtEvent) {
-  const { data } = await axios.post(`${API_BASE}/trips/${tripId}/events/`, {
+async function addDrivingEvent(
+  tripId,
+  eventType,
+  severity,
+  speedKmhAtEvent,
+  latitude,
+  longitude,
+  timestamp
+) {
+  const payload = {
     event_type: eventType,
     severity,
     speed_kmh_at_event: speedKmhAtEvent,
-  });
+    timestamp: timestamp || new Date().toISOString(),
+  };
+
+  if (latitude != null && Number.isFinite(latitude)) {
+    payload.latitude = latitude;
+  }
+
+  if (longitude != null && Number.isFinite(longitude)) {
+    payload.longitude = longitude;
+  }
+
+  const { data } = await apiClient.post(`/trips/${tripId}/events/`, payload);
   return data;
 }
 
@@ -51,8 +91,16 @@ async function endTrip(tripId, endLatitude, endLongitude, endTimeIso, averageSpe
     payload.crash_longitude = crashLongitude;
   }
   
-  const { data } = await axios.patch(`${API_BASE}/trips/${tripId}/`, payload);
+  const { data } = await apiClient.patch(`/trips/${tripId}/`, payload);
   return data;
 }
 
-module.exports = { createTrip, addLocationPoint, addDrivingEvent, endTrip, API_BASE };
+module.exports = {
+  API_BASE,
+  API_HEADERS,
+  MOBILE_API_KEY,
+  createTrip,
+  addLocationPoint,
+  addDrivingEvent,
+  endTrip,
+};

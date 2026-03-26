@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils import timezone
 
 # Create your models here.
 
@@ -36,7 +37,7 @@ class LocationPoint(models.Model):
     trip = models.ForeignKey(Trip, on_delete=models.CASCADE, related_name='location_points')
     latitude = models.FloatField()
     longitude = models.FloatField()
-    timestamp = models.DateTimeField(auto_now_add=True)
+    timestamp = models.DateTimeField(default=timezone.now)
     speed_kmh = models.FloatField(default=0.0)
     accuracy = models.FloatField(null=True, blank=True)
 
