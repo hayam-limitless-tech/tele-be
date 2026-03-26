@@ -11,6 +11,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import CommunityGeolocation from '@react-native-community/geolocation';
 import Geolocation from 'react-native-geolocation-service';
 import { accelerometer, SensorTypes, setUpdateIntervalForType } from 'react-native-sensors';
 import { addLocationPoint, createTrip, endTrip } from './api';
@@ -27,7 +28,23 @@ import type { SpeedHistorySample, TripLocationPoint } from './speedEstimator';
 type TripStatus = 'idle' | 'driving';
 const CRASH_SIGNAL_WINDOW_MS = 2500;
 
+function isAndroidEmulator(): boolean {
+  if (Platform.OS !== 'android') return false;
+  const constants = (Platform as typeof Platform & { constants?: Record<string, unknown> }).constants;
+  const fingerprint = typeof constants?.Fingerprint === 'string' ? constants.Fingerprint : '';
+  const model = typeof constants?.Model === 'string' ? constants.Model : '';
+  const brand = typeof constants?.Brand === 'string' ? constants.Brand : '';
+
+  return (
+    fingerprint.includes('generic') ||
+    fingerprint.includes('emulator') ||
+    model.toLowerCase().includes('sdk') ||
+    brand.toLowerCase().includes('generic')
+  );
+}
+
 function App() {
+  const runningOnAndroidEmulator = isAndroidEmulator();
   const [permissionGranted, setPermissionGranted] = useState(false);
   const [status, setStatus] = useState<TripStatus>('idle');
   const [speedKmh, setSpeedKmh] = useState(0);
@@ -71,6 +88,297 @@ function App() {
   const smoothedSpeedRef = useRef<number>(0);
   const recentSpeedSamplesRef = useRef<Array<{ speedKmh: number; time: number }>>([]);
   const autoStartInProgressRef = useRef<boolean>(false);
+  const locationClient: any = runningOnAndroidEmulator ? CommunityGeolocation : Geolocation;
+
+  const geolocationOptions =
+    Platform.OS === 'android'
+      ? {
+          enableHighAccuracy: true,
+          distanceFilter: 1,
+          interval: 1000,
+          fastestInterval: 1000,
+          ...(runningOnAndroidEmulator
+            ? {}
+            : {
+                showLocationDialog: false,
+                forceRequestLocation: false,
+                forceLocationManager: false,
+              }),
+        }
+      : {
+          enableHighAccuracy: true,
+          distanceFilter: 1,
+          interval: 1000,
+          fastestInterval: 1000,
+          showsBackgroundLocationIndicator: true,
+        };
+
+  function requestCurrentPosition(timeout = 10_000, maximumAge = 15_000): Promise<any> {
+    return new Promise((resolve, reject) => {
+      locationClient.getCurrentPosition(resolve, reject, {
+        ...geolocationOptions,
+        maximumAge,
+        timeout,
+      });
+    });
+  }
+
+  function handleLocationSample(position: any) {
+    const coords = position?.coords;
+    const lat = coords?.latitude != null ? Number(coords.latitude) : NaN;
+    const lng = coords?.longitude != null ? Number(coords.longitude) : NaN;
+    if (Number.isNaN(lat) || Number.isNaN(lng)) return;
+
+    const latitude = lat;
+    const longitude = lng;
+    const timestamp = position.timestamp;
+    const time =
+      typeof timestamp === 'number'
+        ? timestamp < 1e12
+          ? timestamp * 1000
+          : timestamp
+        : Date.now();
+    const accuracy =
+      typeof coords?.accuracy === 'number' && Number.isFinite(coords.accuracy)
+        ? coords.accuracy
+        : 999;
+    const coordsSpeedMs =
+      typeof (coords as { speed?: number | null })?.speed === 'number'
+        ? Number((coords as { speed?: number | null }).speed)
+        : null;
+    const speedAccuracyMs =
+      typeof (coords as { speedAccuracy?: number | null })?.speedAccuracy === 'number'
+        ? Number((coords as { speedAccuracy?: number | null }).speedAccuracy)
+        : null;
+
+    const estimate = updateSpeedEstimate(
+      speedHistoryRef.current,
+      {
+        latitude,
+        longitude,
+        time,
+        accuracy,
+        coordsSpeedMps: coordsSpeedMs,
+        speedAccuracyMps: speedAccuracyMs,
+      },
+      smoothedSpeedRef.current
+    );
+
+    speedHistoryRef.current = estimate.nextHistory;
+    smoothedSpeedRef.current = estimate.displaySpeedKmh;
+    setSpeedKmh(estimate.displaySpeedKmh);
+    setError(null);
+
+    const currentPoint: TripLocationPoint = {
+      latitude,
+      longitude,
+      time,
+      speed: estimate.estimatedSpeedKmh,
+      accuracy,
+      reliable: estimate.isReliable,
+    };
+
+    latestTripPointRef.current = currentPoint;
+    lastLocationRef.current = { lat: latitude, lng: longitude, time };
+
+    const speedForDecisions = estimate.isReliable ? estimate.estimatedSpeedKmh : 0;
+
+    if (tripIdRef.current == null && !autoStartInProgressRef.current) {
+      recentSpeedSamplesRef.current.push({ speedKmh: speedForDecisions, time });
+      const windowMs = 30_000;
+      recentSpeedSamplesRef.current = recentSpeedSamplesRef.current.filter(
+        (sample) => time - sample.time <= windowMs
+      );
+
+      const lastTenSeconds = recentSpeedSamplesRef.current.filter(
+        (sample) => time - sample.time <= 12_000
+      );
+      if (lastTenSeconds.length >= 4) {
+        const averageSpeed =
+          lastTenSeconds.reduce((sum, sample) => sum + sample.speedKmh, 0) /
+          lastTenSeconds.length;
+        const fastSamples = lastTenSeconds.filter((sample) => sample.speedKmh >= 8).length;
+        const displacementConfirmed =
+          estimate.windowSpeedKmh != null ? estimate.windowSpeedKmh >= 8 : estimate.isMoving;
+
+        if (
+          estimate.isReliable &&
+          fastSamples >= 4 &&
+          averageSpeed >= 18 &&
+          displacementConfirmed
+        ) {
+          autoStartInProgressRef.current = true;
+          handleStartTrip();
+        }
+      }
+    }
+
+    const activeTripId = tripIdRef.current;
+    if (activeTripId != null) {
+      tripLocationBuffer.current.push(currentPoint);
+
+      if (
+        currentPoint.reliable &&
+        shouldUploadTripLocation(currentPoint, lastUploadedTripPointRef.current)
+      ) {
+        lastUploadedTripPointRef.current = currentPoint;
+        void addLocationPoint(
+          activeTripId,
+          latitude,
+          longitude,
+          currentPoint.speed,
+          currentPoint.accuracy,
+          new Date(time).toISOString()
+        ).catch((uploadError: any) => {
+          console.warn('Location upload failed:', uploadError?.message || uploadError);
+        });
+      }
+
+      const previousReliablePoint = lastReliableTripPointRef.current;
+      if (currentPoint.reliable && previousReliablePoint) {
+        const timeDeltaSec = (time - previousReliablePoint.time) / 1000;
+
+        if (timeDeltaSec >= 0.5 && timeDeltaSec <= 5) {
+          const accelMagnitude = accelerometerMagnitudeRef.current;
+          const sensorFlagged = accelMagnitude > 13;
+          const speedDrop = previousReliablePoint.speed - currentPoint.speed;
+          const speedRise = currentPoint.speed - previousReliablePoint.speed;
+          const speedDropPercent =
+            previousReliablePoint.speed > 0
+              ? (speedDrop / previousReliablePoint.speed) * 100
+              : 0;
+          const speedRisePercent =
+            previousReliablePoint.speed > 0
+              ? (speedRise / previousReliablePoint.speed) * 100
+              : 0;
+          const speedFlaggedBrake = speedDropPercent >= 30;
+          const speedFlaggedAccel = speedRisePercent >= 30;
+          const gpsGood = currentPoint.accuracy <= 25;
+
+          let countBrake = false;
+          let countAccel = false;
+
+          if (gpsGood) {
+            if (speedFlaggedBrake && sensorFlagged) countBrake = true;
+            if (speedFlaggedAccel && sensorFlagged) countAccel = true;
+          } else if (sensorFlagged) {
+            if (speedFlaggedBrake) {
+              countBrake = true;
+            } else if (speedFlaggedAccel) {
+              countAccel = true;
+            }
+          }
+
+          const now = time;
+          if (countBrake && now - lastHarshBrakeTimeRef.current >= 3000) {
+            harshBrakeCountRef.current += 1;
+            setHarshBrakeCount(harshBrakeCountRef.current);
+            lastHarshBrakeTimeRef.current = now;
+            harshEventsRef.current.push({
+              type: 'braking',
+              timestamp: new Date(now).toISOString(),
+              latitude,
+              longitude,
+              speed: currentPoint.speed,
+            });
+          }
+
+          if (countAccel && now - lastHarshAccelTimeRef.current >= 3000) {
+            harshAccelCountRef.current += 1;
+            setHarshAccelerationCount(harshAccelCountRef.current);
+            lastHarshAccelTimeRef.current = now;
+            harshEventsRef.current.push({
+              type: 'acceleration',
+              timestamp: new Date(now).toISOString(),
+              latitude,
+              longitude,
+              speed: currentPoint.speed,
+            });
+          }
+        }
+
+        if (previousReliablePoint.speed >= 20 && currentPoint.speed < 5 && timeDeltaSec < 2) {
+          speedBasedCrashTimeRef.current = time;
+        }
+      }
+
+      if (currentPoint.reliable) {
+        lastReliableTripPointRef.current = currentPoint;
+      }
+
+      if (
+        speedBasedCrashTimeRef.current != null &&
+        time - speedBasedCrashTimeRef.current > CRASH_SIGNAL_WINDOW_MS
+      ) {
+        speedBasedCrashTimeRef.current = null;
+      }
+      if (
+        sensorBasedCrashTimeRef.current != null &&
+        time - sensorBasedCrashTimeRef.current > CRASH_SIGNAL_WINDOW_MS
+      ) {
+        sensorBasedCrashTimeRef.current = null;
+      }
+
+      if (
+        speedBasedCrashTimeRef.current != null &&
+        sensorBasedCrashTimeRef.current != null &&
+        Math.abs(speedBasedCrashTimeRef.current - sensorBasedCrashTimeRef.current) <=
+          CRASH_SIGNAL_WINDOW_MS &&
+        !crashDetectedRef.current
+      ) {
+        crashDetectedRef.current = true;
+        crashLatRef.current = latitude;
+        crashLngRef.current = longitude;
+        speedBasedCrashTimeRef.current = null;
+        sensorBasedCrashTimeRef.current = null;
+      }
+
+      const timeSinceLastCheck = time - lastSpeedCheckTimeRef.current;
+      if (currentPoint.reliable && timeSinceLastCheck >= 10_000) {
+        lastSpeedCheckTimeRef.current = time;
+
+        getSpeedLimitCached(latitude, longitude)
+          .then((limitData: any) => {
+            setCurrentSpeedLimit(limitData.speedLimit);
+
+            const tolerance = 5;
+            const isSpeeding = currentPoint.speed > limitData.speedLimit + tolerance;
+
+            if (isSpeeding && !wasSpeedingRef.current) {
+              wasSpeedingRef.current = true;
+              speedingStartTimeRef.current = time;
+              speedingViolationsRef.current += 1;
+              setSpeedingViolations(speedingViolationsRef.current);
+            } else if (!isSpeeding && wasSpeedingRef.current) {
+              wasSpeedingRef.current = false;
+              if (speedingStartTimeRef.current) {
+                speedingDurationRef.current += (time - speedingStartTimeRef.current) / 1000;
+                speedingStartTimeRef.current = null;
+              }
+            }
+
+            if (isSpeeding) {
+              const overLimit = currentPoint.speed - limitData.speedLimit;
+              if (overLimit > maxSpeedOverLimitRef.current) {
+                maxSpeedOverLimitRef.current = overLimit;
+              }
+            }
+          })
+          .catch((speedLimitError: any) => {
+            console.warn('Speed limit check failed:', speedLimitError);
+          });
+      }
+    }
+  }
+
+  useEffect(() => {
+    if (Platform.OS !== 'android' || !runningOnAndroidEmulator) return;
+
+    CommunityGeolocation.setRNConfiguration({
+      skipPermissionRequests: true,
+      locationProvider: 'android',
+    });
+  }, [runningOnAndroidEmulator]);
 
   useEffect(() => {
     let cancelled = false;
@@ -144,290 +452,38 @@ function App() {
     setError(null);
 
     let watchId: number | null = null;
+    let emulatorPollInterval: ReturnType<typeof setInterval> | null = null;
     let cancelled = false;
 
     const startWatching = () => {
       if (cancelled) return;
 
       try {
-        watchId = Geolocation.watchPosition(
-          (position) => {
-            const coords = position?.coords;
-            const lat = coords?.latitude != null ? Number(coords.latitude) : NaN;
-            const lng = coords?.longitude != null ? Number(coords.longitude) : NaN;
-            if (Number.isNaN(lat) || Number.isNaN(lng)) return;
-
-            const latitude = lat;
-            const longitude = lng;
-            const timestamp = position.timestamp;
-            const time =
-              typeof timestamp === 'number'
-                ? timestamp < 1e12
-                  ? timestamp * 1000
-                  : timestamp
-                : Date.now();
-            const accuracy =
-              typeof coords?.accuracy === 'number' && Number.isFinite(coords.accuracy)
-                ? coords.accuracy
-                : 999;
-            const coordsSpeedMs =
-              typeof (coords as { speed?: number | null })?.speed === 'number'
-                ? Number((coords as { speed?: number | null }).speed)
-                : null;
-            const speedAccuracyMs =
-              typeof (coords as { speedAccuracy?: number | null })?.speedAccuracy === 'number'
-                ? Number((coords as { speedAccuracy?: number | null }).speedAccuracy)
-                : null;
-
-            const estimate = updateSpeedEstimate(
-              speedHistoryRef.current,
-              {
-                latitude,
-                longitude,
-                time,
-                accuracy,
-                coordsSpeedMps: coordsSpeedMs,
-                speedAccuracyMps: speedAccuracyMs,
-              },
-              smoothedSpeedRef.current
-            );
-
-            speedHistoryRef.current = estimate.nextHistory;
-            smoothedSpeedRef.current = estimate.displaySpeedKmh;
-            setSpeedKmh(estimate.displaySpeedKmh);
-            setError(null);
-
-            const currentPoint: TripLocationPoint = {
-              latitude,
-              longitude,
-              time,
-              speed: estimate.estimatedSpeedKmh,
-              accuracy,
-              reliable: estimate.isReliable,
-            };
-
-            latestTripPointRef.current = currentPoint;
-            lastLocationRef.current = { lat: latitude, lng: longitude, time };
-
-            const speedForDecisions = estimate.isReliable ? estimate.estimatedSpeedKmh : 0;
-
-            if (tripIdRef.current == null && !autoStartInProgressRef.current) {
-              recentSpeedSamplesRef.current.push({ speedKmh: speedForDecisions, time });
-              const windowMs = 30_000;
-              recentSpeedSamplesRef.current = recentSpeedSamplesRef.current.filter(
-                (sample) => time - sample.time <= windowMs
-              );
-
-              const lastTenSeconds = recentSpeedSamplesRef.current.filter(
-                (sample) => time - sample.time <= 12_000
-              );
-              if (lastTenSeconds.length >= 4) {
-                const averageSpeed =
-                  lastTenSeconds.reduce((sum, sample) => sum + sample.speedKmh, 0) /
-                  lastTenSeconds.length;
-                const fastSamples = lastTenSeconds.filter((sample) => sample.speedKmh >= 8).length;
-                const displacementConfirmed =
-                  estimate.windowSpeedKmh != null
-                    ? estimate.windowSpeedKmh >= 8
-                    : estimate.isMoving;
-
-                if (
-                  estimate.isReliable &&
-                  fastSamples >= 4 &&
-                  averageSpeed >= 18 &&
-                  displacementConfirmed
-                ) {
-                  autoStartInProgressRef.current = true;
-                  handleStartTrip();
-                }
-              }
-            }
-
-            const activeTripId = tripIdRef.current;
-            if (activeTripId != null) {
-              tripLocationBuffer.current.push(currentPoint);
-
-              if (
-                currentPoint.reliable &&
-                shouldUploadTripLocation(currentPoint, lastUploadedTripPointRef.current)
-              ) {
-                lastUploadedTripPointRef.current = currentPoint;
-                void addLocationPoint(
-                  activeTripId,
-                  latitude,
-                  longitude,
-                  currentPoint.speed,
-                  currentPoint.accuracy,
-                  new Date(time).toISOString()
-                ).catch((uploadError: any) => {
-                  console.warn('Location upload failed:', uploadError?.message || uploadError);
-                });
-              }
-
-              const previousReliablePoint = lastReliableTripPointRef.current;
-              if (currentPoint.reliable && previousReliablePoint) {
-                const timeDeltaSec = (time - previousReliablePoint.time) / 1000;
-
-                if (timeDeltaSec >= 0.5 && timeDeltaSec <= 5) {
-                  const accelMagnitude = accelerometerMagnitudeRef.current;
-                  const sensorFlagged = accelMagnitude > 13;
-                  const speedDrop = previousReliablePoint.speed - currentPoint.speed;
-                  const speedRise = currentPoint.speed - previousReliablePoint.speed;
-                  const speedDropPercent =
-                    previousReliablePoint.speed > 0
-                      ? (speedDrop / previousReliablePoint.speed) * 100
-                      : 0;
-                  const speedRisePercent =
-                    previousReliablePoint.speed > 0
-                      ? (speedRise / previousReliablePoint.speed) * 100
-                      : 0;
-                  const speedFlaggedBrake = speedDropPercent >= 30;
-                  const speedFlaggedAccel = speedRisePercent >= 30;
-                  const gpsGood = currentPoint.accuracy <= 25;
-
-                  let countBrake = false;
-                  let countAccel = false;
-
-                  if (gpsGood) {
-                    if (speedFlaggedBrake && sensorFlagged) countBrake = true;
-                    if (speedFlaggedAccel && sensorFlagged) countAccel = true;
-                  } else if (sensorFlagged) {
-                    if (speedFlaggedBrake) {
-                      countBrake = true;
-                    } else if (speedFlaggedAccel) {
-                      countAccel = true;
-                    }
-                  }
-
-                  const now = time;
-                  if (countBrake && now - lastHarshBrakeTimeRef.current >= 3000) {
-                    harshBrakeCountRef.current += 1;
-                    setHarshBrakeCount(harshBrakeCountRef.current);
-                    lastHarshBrakeTimeRef.current = now;
-                    harshEventsRef.current.push({
-                      type: 'braking',
-                      timestamp: new Date(now).toISOString(),
-                      latitude,
-                      longitude,
-                      speed: currentPoint.speed,
-                    });
-                  }
-
-                  if (countAccel && now - lastHarshAccelTimeRef.current >= 3000) {
-                    harshAccelCountRef.current += 1;
-                    setHarshAccelerationCount(harshAccelCountRef.current);
-                    lastHarshAccelTimeRef.current = now;
-                    harshEventsRef.current.push({
-                      type: 'acceleration',
-                      timestamp: new Date(now).toISOString(),
-                      latitude,
-                      longitude,
-                      speed: currentPoint.speed,
-                    });
-                  }
-                }
-
-                if (
-                  previousReliablePoint.speed >= 20 &&
-                  currentPoint.speed < 5 &&
-                  timeDeltaSec < 2
-                ) {
-                  speedBasedCrashTimeRef.current = time;
-                }
-              }
-
-              if (currentPoint.reliable) {
-                lastReliableTripPointRef.current = currentPoint;
-              }
-
-              if (
-                speedBasedCrashTimeRef.current != null &&
-                time - speedBasedCrashTimeRef.current > CRASH_SIGNAL_WINDOW_MS
-              ) {
-                speedBasedCrashTimeRef.current = null;
-              }
-              if (
-                sensorBasedCrashTimeRef.current != null &&
-                time - sensorBasedCrashTimeRef.current > CRASH_SIGNAL_WINDOW_MS
-              ) {
-                sensorBasedCrashTimeRef.current = null;
-              }
-
-              if (
-                speedBasedCrashTimeRef.current != null &&
-                sensorBasedCrashTimeRef.current != null &&
-                Math.abs(speedBasedCrashTimeRef.current - sensorBasedCrashTimeRef.current) <=
-                  CRASH_SIGNAL_WINDOW_MS &&
-                !crashDetectedRef.current
-              ) {
-                crashDetectedRef.current = true;
-                crashLatRef.current = latitude;
-                crashLngRef.current = longitude;
-                speedBasedCrashTimeRef.current = null;
-                sensorBasedCrashTimeRef.current = null;
-              }
-
-              const timeSinceLastCheck = time - lastSpeedCheckTimeRef.current;
-              if (currentPoint.reliable && timeSinceLastCheck >= 10_000) {
-                lastSpeedCheckTimeRef.current = time;
-
-                getSpeedLimitCached(latitude, longitude)
-                  .then((limitData: any) => {
-                    setCurrentSpeedLimit(limitData.speedLimit);
-
-                    const tolerance = 5;
-                    const isSpeeding = currentPoint.speed > limitData.speedLimit + tolerance;
-
-                    if (isSpeeding && !wasSpeedingRef.current) {
-                      wasSpeedingRef.current = true;
-                      speedingStartTimeRef.current = time;
-                      speedingViolationsRef.current += 1;
-                      setSpeedingViolations(speedingViolationsRef.current);
-                    } else if (!isSpeeding && wasSpeedingRef.current) {
-                      wasSpeedingRef.current = false;
-                      if (speedingStartTimeRef.current) {
-                        speedingDurationRef.current +=
-                          (time - speedingStartTimeRef.current) / 1000;
-                        speedingStartTimeRef.current = null;
-                      }
-                    }
-
-                    if (isSpeeding) {
-                      const overLimit = currentPoint.speed - limitData.speedLimit;
-                      if (overLimit > maxSpeedOverLimitRef.current) {
-                        maxSpeedOverLimitRef.current = overLimit;
-                      }
-                    }
-                  })
-                  .catch((speedLimitError: any) => {
-                    console.warn('Speed limit check failed:', speedLimitError);
-                  });
-              }
-            }
-          },
-          (watchError) => {
+        watchId = locationClient.watchPosition(
+          handleLocationSample,
+          (watchError: any) => {
             setError(`Location error: ${watchError.message}`);
             console.error('Geolocation error:', watchError);
           },
-          Platform.OS === 'android'
-            ? {
-                enableHighAccuracy: true,
-                distanceFilter: 1,
-                interval: 1000,
-                fastestInterval: 1000,
-                showLocationDialog: false,
-                forceRequestLocation: false,
-              }
-            : {
-                enableHighAccuracy: true,
-                distanceFilter: 1,
-                interval: 1000,
-                fastestInterval: 1000,
-                showsBackgroundLocationIndicator: true,
-              }
+          geolocationOptions
         );
 
         watchIdRef.current = watchId;
+
+        if (runningOnAndroidEmulator) {
+          const pollEmulatorLocation = () => {
+            requestCurrentPosition(5000, 5000)
+              .then(handleLocationSample)
+              .catch((locationError: any) => {
+                if (!cancelled && !lastLocationRef.current) {
+                  setError(`Location error: ${locationError?.message || 'Unable to read location'}`);
+                }
+              });
+          };
+
+          pollEmulatorLocation();
+          emulatorPollInterval = setInterval(pollEmulatorLocation, 1500);
+        }
       } catch (watchStartError) {
         console.error('Geolocation.watchPosition failed', watchStartError);
         setError(
@@ -443,14 +499,17 @@ function App() {
     return () => {
       cancelled = true;
       clearTimeout(timeout);
+      if (emulatorPollInterval) {
+        clearInterval(emulatorPollInterval);
+      }
       if (watchIdRef.current !== null) {
         try {
-          Geolocation.clearWatch(watchIdRef.current);
+          locationClient.clearWatch(watchIdRef.current);
         } catch (_clearError) {}
         watchIdRef.current = null;
       }
     };
-  }, [permissionGranted]);
+  }, [permissionGranted, runningOnAndroidEmulator]);
 
   useEffect(() => {
     let subscription: { unsubscribe: () => void } | null = null;
@@ -502,9 +561,23 @@ function App() {
     if (isStartingTrip) return;
     setError(null);
 
-    const position = lastLocationRef.current;
+    let position = lastLocationRef.current;
+    if (!position) {
+      autoStartInProgressRef.current = true;
+      try {
+        const freshPosition = await requestCurrentPosition(8000, 30_000);
+        handleLocationSample(freshPosition);
+        position = lastLocationRef.current;
+      } catch (locationError: any) {
+        setError(locationError?.message ? `Location error: ${locationError.message}` : 'Wait for location');
+        autoStartInProgressRef.current = false;
+        return;
+      }
+    }
+
     if (!position) {
       setError('Wait for location');
+      autoStartInProgressRef.current = false;
       return;
     }
 
@@ -562,7 +635,9 @@ function App() {
         try {
           await startForegroundService();
         } catch (_foregroundServiceError) {}
-        showBatteryPrompt();
+        if (!runningOnAndroidEmulator) {
+          showBatteryPrompt();
+        }
       }
     } catch (startError: any) {
       setError(startError?.message || 'Failed to start trip');
